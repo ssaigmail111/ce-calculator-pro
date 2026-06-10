@@ -1,0 +1,1489 @@
+2. pubspec.yaml
+
+
+
+name: ce_engineering_calculator_pro  
+description: A professional engineering calculator for Civil Engineering.  
+publish_to: 'none'  
+version: 1.0.0+1  
+  
+environment:  
+  sdk: '>=3.0.0 <4.0.0'  
+  
+dependencies:  
+  flutter:  
+    sdk: flutter  
+  cupertino_icons: ^1.0.6  
+  provider: ^6.1.1  
+  sqflite: ^2.3.0  
+  path_provider: ^2.1.1  
+  math_expressions: ^2.4.0  
+  pdf: ^3.10.7  
+  printing: ^5.11.1  
+  share_plus: ^7.2.1  
+  intl: ^0.18.1  
+  
+dev_dependencies:  
+  flutter_test:  
+    sdk: flutter  
+  flutter_lints: ^3.0.0  
+  
+flutter:  
+  uses-material-design: true
+
+
+---
+
+3. Database Schema (SQLite)
+
+
+
+Table calculations stores all history entries.
+
+CREATE TABLE calculations (  
+  id INTEGER PRIMARY KEY AUTOINCREMENT,  
+  type TEXT NOT NULL,            -- 'scientific', 'concrete', 'steel', 'unit'  
+  input TEXT,                    -- expression or input summary  
+  result TEXT,                   -- computed result  
+  timestamp TEXT NOT NULL        -- ISO 8601  
+);
+
+Table favorite_formulas stores only the formula IDs that the user has favourited.
+
+CREATE TABLE favorite_formulas (  
+  id INTEGER PRIMARY KEY AUTOINCREMENT,  
+  formula_id INTEGER UNIQUE NOT NULL  
+);
+
+
+---
+
+4. Complete Dart Source Code
+
+
+
+4.1 lib/main.dart
+
+import 'package:flutter/material.dart';  
+import 'package:provider/provider.dart';  
+import 'app.dart';  
+import 'providers/theme_provider.dart';  
+import 'providers/calculator_provider.dart';  
+import 'providers/concrete_provider.dart';  
+import 'providers/steel_provider.dart';  
+import 'providers/unit_converter_provider.dart';  
+import 'providers/formula_provider.dart';  
+import 'providers/history_provider.dart';  
+import 'services/database_service.dart';  
+  
+void main() async {  
+  WidgetsFlutterBinding.ensureInitialized();  
+  await DatabaseService.instance.database; // initialise DB  
+  runApp(  
+    MultiProvider(  
+      providers: [  
+        ChangeNotifierProvider(create: (_) => ThemeProvider()),  
+        ChangeNotifierProvider(create: (_) => CalculatorProvider()),  
+        ChangeNotifierProvider(create: (_) => ConcreteProvider()),  
+        ChangeNotifierProvider(create: (_) => SteelProvider()),  
+        ChangeNotifierProvider(create: (_) => UnitConverterProvider()),  
+        ChangeNotifierProvider(create: (_) => FormulaProvider()),  
+        ChangeNotifierProvider(create: (_) => HistoryProvider()),  
+      ],  
+      child: const CEApp(),  
+    ),  
+  );  
+}
+
+4.2 lib/app.dart
+
+import 'package:flutter/material.dart';  
+import 'package:provider/provider.dart';  
+import 'providers/theme_provider.dart';  
+import 'screens/home_screen.dart';  
+  
+class CEApp extends StatelessWidget {  
+  const CEApp({super.key});  
+  
+  @override  
+  Widget build(BuildContext context) {  
+    final themeProvider = context.watch<ThemeProvider>();  
+    return MaterialApp(  
+      title: 'CE Calculator Pro',  
+      debugShowCheckedModeBanner: false,  
+      themeMode: themeProvider.themeMode,  
+      theme: ThemeData(  
+        useMaterial3: true,  
+        colorSchemeSeed: const Color(0xFF1565C0), // engineering blue  
+        brightness: Brightness.light,  
+      ),  
+      darkTheme: ThemeData(  
+        useMaterial3: true,  
+        colorSchemeSeed: const Color(0xFF1565C0),  
+        brightness: Brightness.dark,  
+      ),  
+      home: const HomeScreen(),  
+    );  
+  }  
+}
+
+4.3 lib/models/calculation.dart
+
+class Calculation {  
+  final int? id;  
+  final String type;  
+  final String input;  
+  final String result;  
+  final DateTime timestamp;  
+  
+  Calculation({  
+    this.id,  
+    required this.type,  
+    required this.input,  
+    required this.result,  
+    required this.timestamp,  
+  });  
+  
+  Map<String, dynamic> toMap() => {  
+        'id': id,  
+        'type': type,  
+        'input': input,  
+        'result': result,  
+        'timestamp': timestamp.toIso8601String(),  
+      };  
+  
+  factory Calculation.fromMap(Map<String, dynamic> map) => Calculation(  
+        id: map['id'],  
+        type: map['type'],  
+        input: map['input'],  
+        result: map['result'],  
+        timestamp: DateTime.parse(map['timestamp']),  
+      );  
+}
+
+4.4 lib/models/formula.dart
+
+class Formula {  
+  final int id;  
+  final String title;  
+  final String formula;  
+  final String description;  
+  final String category; // 'Concrete', 'Steel', 'Structural', 'Surveying', 'Mathematics'  
+  
+  const Formula({  
+    required this.id,  
+    required this.title,  
+    required this.formula,  
+    required this.description,  
+    required this.category,  
+  });  
+}
+
+4.5 lib/providers/theme_provider.dart
+
+import 'package:flutter/material.dart';  
+  
+class ThemeProvider with ChangeNotifier {  
+  ThemeMode _themeMode = ThemeMode.system;  
+  
+  ThemeMode get themeMode => _themeMode;  
+  
+  void toggleTheme(bool isDark) {  
+    _themeMode = isDark ? ThemeMode.dark : ThemeMode.light;  
+    notifyListeners();  
+  }  
+}
+
+4.6 lib/providers/calculator_provider.dart
+
+import 'dart:math' as math;  
+import 'package:flutter/material.dart';  
+import 'package:math_expressions/math_expressions.dart';  
+import '../models/calculation.dart';  
+import '../services/database_service.dart';  
+  
+class CalculatorProvider with ChangeNotifier {  
+  String _expression = '';  
+  String _result = '0';  
+  bool _isRadians = true;  
+  final List<String> _history = [];  
+  
+  String get expression => _expression;  
+  String get result => _result;  
+  bool get isRadians => _isRadians;  
+  List<String> get history => _history;  
+  
+  void input(String value) {  
+    if (value == 'C') {  
+      _expression = '';  
+      _result = '0';  
+    } else if (value == '⌫') {  
+      _expression = _expression.isNotEmpty  
+          ? _expression.substring(0, _expression.length - 1)  
+          : '';  
+    } else if (value == '=') {  
+      _calculate();  
+    } else {  
+      _expression += value;  
+    }  
+    notifyListeners();  
+  }  
+  
+  void _calculate() {  
+    if (_expression.isEmpty) return;  
+    try {  
+      String exp = _expression  
+          .replaceAll('×', '*')  
+          .replaceAll('÷', '/')  
+          .replaceAll('π', pi.toString())  
+          .replaceAll('e', math.e.toString())  
+          .replaceAll('^', '^'); // pow handled by parser  
+  
+      // Replace factorial manually (parser doesn't support !)  
+      if (exp.contains('!')) {  
+        exp = _handleFactorial(exp);  
+      }  
+  
+      // Convert trig functions for degree mode  
+      if (!_isRadians) {  
+        exp = exp.replaceAllMapped(  
+            RegExp(r'(sin|cos|tan)\(([^)]+)\)'), (match) {  
+          final func = match.group(1)!;  
+          final arg = match.group(2)!;  
+          return '$func($arg*${math.pi / 180})';  
+        });  
+      }  
+  
+      Parser p = Parser();  
+      Expression e = p.parse(exp);  
+      ContextModel cm = ContextModel();  
+      double eval = e.evaluate(EvaluationType.REAL, cm);  
+      _result = _formatNumber(eval);  
+  
+      // Save to history (DB)  
+      final calc = Calculation(  
+        type: 'scientific',  
+        input: _expression,  
+        result: _result,  
+        timestamp: DateTime.now(),  
+      );  
+      DatabaseService.instance.saveCalculation(calc);  
+  
+      // Keep local in-memory history for quick display  
+      _history.insert(0, '$_expression = $_result');  
+      if (_history.length > 20) _history.removeLast();  
+    } catch (e) {  
+      _result = 'Error';  
+    }  
+    notifyListeners();  
+  }  
+  
+  String _handleFactorial(String exp) {  
+    // Replace number! with factorial(number)  
+    return exp.replaceAllMapped(RegExp(r'(\d+)!'), (match) {  
+      final n = int.parse(match.group(1)!);  
+      return _factorial(n).toString();  
+    });  
+  }  
+  
+  double _factorial(int n) {  
+    if (n < 0) throw ArgumentError('Negative factorial');  
+    double res = 1;  
+    for (int i = 2; i <= n; i++) res *= i;  
+    return res;  
+  }  
+  
+  String _formatNumber(double d) {  
+    if (d == d.toInt()) return d.toInt().toString();  
+    return d.toStringAsFixed(6).replaceAll(RegExp(r'0*$'), '').replaceAll(RegExp(r'\.$'), '');  
+  }  
+  
+  void toggleAngleMode() {  
+    _isRadians = !_isRadians;  
+    notifyListeners();  
+  }  
+  
+  void clearHistory() {  
+    _history.clear();  
+    notifyListeners();  
+  }  
+}
+
+4.7 lib/providers/concrete_provider.dart
+
+import 'package:flutter/material.dart';  
+import '../models/calculation.dart';  
+import '../services/database_service.dart';  
+  
+class ConcreteProvider with ChangeNotifier {  
+  // Slab  
+  double slabLength = 0, slabWidth = 0, slabThickness = 0;  
+  // Beam  
+  double beamLength = 0, beamWidth = 0, beamDepth = 0;  
+  // Column  
+  double columnSide = 0, columnHeight = 0;  
+  // Footing  
+  double footingLength = 0, footingWidth = 0, footingDepth = 0;  
+  // Wastage  
+  double wastagePercent = 5.0;  
+  
+  String result = '';  
+  List<String> steps = [];  
+  
+  void setWastage(double v) {  
+    wastagePercent = v;  
+    notifyListeners();  
+  }  
+  
+  void calculateSlab() {  
+    double volume = slabLength * slabWidth * slabThickness;  
+    _compute(volume);  
+    notifyListeners();  
+  }  
+  
+  void calculateBeam() {  
+    double volume = beamLength * beamWidth * beamDepth;  
+    _compute(volume);  
+    notifyListeners();  
+  }  
+  
+  void calculateColumn() {  
+    double volume = columnSide * columnSide * columnHeight;  
+    _compute(volume);  
+    notifyListeners();  
+  }  
+  
+  void calculateFooting() {  
+    double volume = footingLength * footingWidth * footingDepth;  
+    _compute(volume);  
+    notifyListeners();  
+  }  
+  
+  void _compute(double volumeM3) {  
+    double wastageFactor = 1 + (wastagePercent / 100);  
+    double totalVol = volumeM3 * wastageFactor;  
+    double volCFT = totalVol * 35.3147;  
+  
+    // M20 ratio 1:1.5:3  
+    double cementBags = (totalVol * 8.06); // approx bags per m³  
+    double sand = totalVol * 0.42; // m³  
+    double aggregate = totalVol * 0.84; // m³  
+  
+    steps = [  
+      'Volume (without wastage) = $volumeM3 m³',  
+      'Wastage $wastagePercent% => Total volume = $totalVol m³',  
+      'Volume in cubic feet = $volCFT ft³',  
+      'Cement = ${cementBags.toStringAsFixed(2)} bags',  
+      'Sand = ${sand.toStringAsFixed(2)} m³',  
+      'Aggregate = ${aggregate.toStringAsFixed(2)} m³',  
+    ];  
+    result = 'Concrete: $totalVol m³ | $volCFT ft³';  
+  
+    final calc = Calculation(  
+      type: 'concrete',  
+      input: 'Slab/Beam/Column calc',  
+      result: result,  
+      timestamp: DateTime.now(),  
+    );  
+    DatabaseService.instance.saveCalculation(calc);  
+  }  
+}
+
+4.8 lib/providers/steel_provider.dart
+
+import 'package:flutter/material.dart';  
+import '../models/calculation.dart';  
+import '../services/database_service.dart';  
+  
+class SteelProvider with ChangeNotifier {  
+  double? _selectedDiameter;  
+  double length = 0;  
+  int quantity = 1;  
+  String result = '';  
+  
+  final List<double> diameters = [6, 8, 10, 12, 16, 20, 25, 32];  
+  
+  double? get selectedDiameter => _selectedDiameter;  
+  List<double> get availableDiameters => diameters;  
+  
+  void setDiameter(double d) {  
+    _selectedDiameter = d;  
+    notifyListeners();  
+  }  
+  
+  void setLength(double v) {  
+    length = v;  
+    notifyListeners();  
+  }  
+  
+  void setQuantity(int v) {  
+    quantity = v;  
+    notifyListeners();  
+  }  
+  
+  void calculateWeight() {  
+    if (_selectedDiameter == null || length <= 0 || quantity <= 0) return;  
+    double d = _selectedDiameter!;  
+    // weight per meter = d² / 162 (kg/m)  
+    double weightPerMeter = (d * d) / 162.0;  
+    double totalWeight = weightPerMeter * length * quantity;  
+    result =  
+        'Total weight: ${totalWeight.toStringAsFixed(2)} kg\n(${weightPerMeter.toStringAsFixed(3)} kg/m × $length m × $quantity)';  
+  
+    final calc = Calculation(  
+      type: 'steel',  
+      input: 'Dia:${d}mm L:${length}m Qty:$quantity',  
+      result: '${totalWeight.toStringAsFixed(2)} kg',  
+      timestamp: DateTime.now(),  
+    );  
+    DatabaseService.instance.saveCalculation(calc);  
+    notifyListeners();  
+  }  
+}
+
+4.9 lib/providers/unit_converter_provider.dart
+
+import 'package:flutter/material.dart';  
+import '../models/calculation.dart';  
+import '../services/database_service.dart';  
+import '../utils/converters.dart';  
+  
+class UnitConverterProvider with ChangeNotifier {  
+  String category = 'Length';  
+  String fromUnit = 'Meter';  
+  String toUnit = 'Foot';  
+  double inputValue = 0;  
+  double outputValue = 0;  
+  
+  List<String> get categories => Converters.categories;  
+  List<String> unitsForCategory() => Converters.units(category);  
+  
+  void setCategory(String cat) {  
+    category = cat;  
+    final units = unitsForCategory();  
+    fromUnit = units.first;  
+    toUnit = units.length > 1 ? units[1] : units.first;  
+    convert();  
+    notifyListeners();  
+  }  
+  
+  void setFromUnit(String u) {  
+    fromUnit = u;  
+    convert();  
+    notifyListeners();  
+  }  
+  
+  void setToUnit(String u) {  
+    toUnit = u;  
+    convert();  
+    notifyListeners();  
+  }  
+  
+  void setInput(double v) {  
+    inputValue = v;  
+    convert();  
+    notifyListeners();  
+  }  
+  
+  void convert() {  
+    if (inputValue == 0) {  
+      outputValue = 0;  
+      return;  
+    }  
+    double? factor = Converters.convert(category, fromUnit, toUnit, inputValue);  
+    outputValue = factor ?? 0;  
+    if (factor != null) {  
+      final calc = Calculation(  
+        type: 'unit',  
+        input: '$inputValue $fromUnit → $toUnit',  
+        result: outputValue.toStringAsFixed(4),  
+        timestamp: DateTime.now(),  
+      );  
+      DatabaseService.instance.saveCalculation(calc);  
+    }  
+    notifyListeners();  
+  }  
+}
+
+4.10 lib/providers/formula_provider.dart
+
+import 'package:flutter/material.dart';  
+import '../models/formula.dart';  
+import '../services/database_service.dart';  
+  
+class FormulaProvider with ChangeNotifier {  
+  List<Formula> _allFormulas = [];  
+  List<Formula> _filtered = [];  
+  Set<int> _favoriteIds = {};  
+  String _searchQuery = '';  
+  
+  List<Formula> get filteredFormulas => _filtered;  
+  bool isFavorite(int id) => _favoriteIds.contains(id);  
+  
+  FormulaProvider() {  
+    _loadFormulas();  
+    _loadFavorites();  
+  }  
+  
+  void _loadFormulas() {  
+    _allFormulas = [  
+      // Concrete formulas  
+      Formula(id: 1, title: 'Volume of Slab', formula: 'V = L × B × T', description: 'Calculate concrete volume for slab.', category: 'Concrete'),  
+      Formula(id: 2, title: 'Volume of Beam', formula: 'V = L × B × D', description: 'Volume of rectangular beam.', category: 'Concrete'),  
+      // Steel formulas  
+      Formula(id: 3, title: 'Steel Weight (kg/m)', formula: 'W = D² / 162', description: 'Weight per meter for rebar.', category: 'Steel'),  
+      // Structural  
+      Formula(id: 4, title: 'Moment of Inertia (Rectangle)', formula: 'I = (b×h³)/12', description: 'Moment of inertia for rectangular section.', category: 'Structural'),  
+      // Surveying  
+      Formula(id: 5, title: 'Area by Coordinates', formula: 'A = 0.5|Σ(x_i y_{i+1} - x_{i+1} y_i)|', description: 'Area of polygon from coordinates.', category: 'Surveying'),  
+      // Mathematics  
+      Formula(id: 6, title: 'Quadratic Formula', formula: 'x = (-b ± √(b²-4ac))/2a', description: 'Roots of quadratic equation.', category: 'Mathematics'),  
+    ];  
+    _updateFilter();  
+  }  
+  
+  void search(String query) {  
+    _searchQuery = query.toLowerCase();  
+    _updateFilter();  
+    notifyListeners();  
+  }  
+  
+  void _updateFilter() {  
+    _filtered = _searchQuery.isEmpty  
+        ? List.from(_allFormulas)  
+        : _allFormulas.where((f) =>  
+            f.title.toLowerCase().contains(_searchQuery) ||  
+            f.formula.toLowerCase().contains(_searchQuery) ||  
+            f.description.toLowerCase().contains(_searchQuery)).toList();  
+  }  
+  
+  Future<void> _loadFavorites() async {  
+    final favs = await DatabaseService.instance.getFavoriteIds();  
+    _favoriteIds = favs.toSet();  
+    notifyListeners();  
+  }  
+  
+  Future<void> toggleFavorite(int formulaId) async {  
+    if (_favoriteIds.contains(formulaId)) {  
+      _favoriteIds.remove(formulaId);  
+      await DatabaseService.instance.removeFavorite(formulaId);  
+    } else {  
+      _favoriteIds.add(formulaId);  
+      await DatabaseService.instance.addFavorite(formulaId);  
+    }  
+    notifyListeners();  
+  }  
+}
+
+4.11 lib/providers/history_provider.dart
+
+import 'package:flutter/material.dart';  
+import '../models/calculation.dart';  
+import '../services/database_service.dart';  
+import '../services/pdf_export_service.dart';  
+  
+class HistoryProvider with ChangeNotifier {  
+  List<Calculation> _calculations = [];  
+  List<Calculation> _filtered = [];  
+  String _searchQuery = '';  
+  
+  List<Calculation> get filteredCalculations => _filtered;  
+  
+  HistoryProvider() {  
+    loadHistory();  
+  }  
+  
+  Future<void> loadHistory() async {  
+    _calculations = await DatabaseService.instance.getAllCalculations();  
+    _applyFilter();  
+    notifyListeners();  
+  }  
+  
+  void search(String query) {  
+    _searchQuery = query.toLowerCase();  
+    _applyFilter();  
+    notifyListeners();  
+  }  
+  
+  void _applyFilter() {  
+    _filtered = _searchQuery.isEmpty  
+        ? List.from(_calculations)  
+        : _calculations  
+            .where((c) =>  
+                c.input.toLowerCase().contains(_searchQuery) ||  
+                c.result.toLowerCase().contains(_searchQuery) ||  
+                c.type.toLowerCase().contains(_searchQuery))  
+            .toList();  
+  }  
+  
+  Future<void> deleteCalculation(int id) async {  
+    await DatabaseService.instance.deleteCalculation(id);  
+    await loadHistory();  
+  }  
+  
+  Future<void> clearAll() async {  
+    await DatabaseService.instance.clearAllCalculations();  
+    await loadHistory();  
+  }  
+  
+  Future<void> exportToPDF() async {  
+    await PDFExportService.exportCalculations(_calculations);  
+  }  
+}
+
+4.12 lib/screens/home_screen.dart
+
+import 'package:flutter/material.dart';  
+import '../widgets/custom_drawer.dart';  
+import 'scientific_calculator_screen.dart';  
+import 'concrete_calculator_screen.dart';  
+import 'steel_weight_screen.dart';  
+import 'unit_converter_screen.dart';  
+import 'formula_library_screen.dart';  
+import 'history_screen.dart';  
+  
+class HomeScreen extends StatefulWidget {  
+  const HomeScreen({super.key});  
+  @override  
+  State<HomeScreen> createState() => _HomeScreenState();  
+}  
+  
+class _HomeScreenState extends State<HomeScreen> {  
+  int _currentIndex = 0;  
+  final List<Widget> _screens = const [  
+    ScientificCalculatorScreen(),  
+    ConcreteCalculatorScreen(),  
+    SteelWeightScreen(),  
+    UnitConverterScreen(),  
+    FormulaLibraryScreen(),  
+    HistoryScreen(),  
+  ];  
+  
+  final List<String> _titles = [  
+    'Scientific Calculator',  
+    'Concrete Calculator',  
+    'Steel Weight',  
+    'Unit Converter',  
+    'Formula Library',  
+    'History',  
+  ];  
+  
+  @override  
+  Widget build(BuildContext context) {  
+    return Scaffold(  
+      appBar: AppBar(  
+        title: Text(_titles[_currentIndex]),  
+        centerTitle: true,  
+      ),  
+      drawer: const CustomDrawer(),  
+      body: IndexedStack(  
+        index: _currentIndex,  
+        children: _screens,  
+      ),  
+      bottomNavigationBar: NavigationBar(  
+        selectedIndex: _currentIndex,  
+        onDestinationSelected: (i) => setState(() => _currentIndex = i),  
+        animationDuration: const Duration(milliseconds: 300),  
+        destinations: const [  
+          NavigationDestination(icon: Icon(Icons.calculate), label: 'Calc'),  
+          NavigationDestination(icon: Icon(Icons.build), label: 'Concrete'),  
+          NavigationDestination(icon: Icon(Icons.iron), label: 'Steel'),  
+          NavigationDestination(icon: Icon(Icons.swap_horiz), label: 'Units'),  
+          NavigationDestination(icon: Icon(Icons.book), label: 'Formulas'),  
+          NavigationDestination(icon: Icon(Icons.history), label: 'History'),  
+        ],  
+      ),  
+    );  
+  }  
+}
+
+4.13 lib/screens/scientific_calculator_screen.dart
+
+import 'package:flutter/material.dart';  
+import 'package:provider/provider.dart';  
+import '../providers/calculator_provider.dart';  
+  
+class ScientificCalculatorScreen extends StatelessWidget {  
+  const ScientificCalculatorScreen({super.key});  
+  
+  @override  
+  Widget build(BuildContext context) {  
+    final calc = context.watch<CalculatorProvider>();  
+    return Column(  
+      children: [  
+        // Display  
+        Container(  
+          alignment: Alignment.bottomRight,  
+          padding: const EdgeInsets.all(16),  
+          child: Column(  
+            crossAxisAlignment: CrossAxisAlignment.end,  
+            children: [  
+              Text(calc.expression, style: Theme.of(context).textTheme.headlineSmall),  
+              const SizedBox(height: 8),  
+              Text(calc.result, style: Theme.of(context).textTheme.headlineLarge?.copyWith(fontWeight: FontWeight.bold)),  
+            ],  
+          ),  
+        ),  
+        const Divider(),  
+        // Angle toggle & copy  
+        Padding(  
+          padding: const EdgeInsets.symmetric(horizontal: 8.0),  
+          child: Row(  
+            children: [  
+              ChoiceChip(  
+                label: Text(calc.isRadians ? 'RAD' : 'DEG'),  
+                selected: true,  
+                onSelected: (_) => calc.toggleAngleMode(),  
+              ),  
+              const Spacer(),  
+              IconButton(  
+                icon: const Icon(Icons.copy),  
+                tooltip: 'Copy result',  
+                onPressed: () {  
+                  // Copy result to clipboard  
+                  ScaffoldMessenger.of(context).showSnackBar(  
+                    const SnackBar(content: Text('Result copied!')),  
+                  );  
+                },  
+              ),  
+            ],  
+          ),  
+        ),  
+        // Calculator buttons  
+        Expanded(  
+          child: GridView.count(  
+            crossAxisCount: 5,  
+            childAspectRatio: 1.2,  
+            padding: const EdgeInsets.all(8),  
+            children: _buttons(calc),  
+          ),  
+        ),  
+      ],  
+    );  
+  }  
+  
+  List<Widget> _buttons(CalculatorProvider calc) {  
+    final btns = [  
+      'C', '⌫', '%', '÷', 'π',  
+      '7', '8', '9', '×', 'e',  
+      '4', '5', '6', '-', '(',  
+      '1', '2', '3', '+', ')',  
+      '0', '.', '!', '=', '^',  
+      'sin', 'cos', 'tan', 'log', 'ln',  
+      '√', 'x²', 'x³', 'xʸ', '=',  
+    ];  
+    return btns.map((b) {  
+      return ElevatedButton(  
+        onPressed: () {  
+          if (b == '√') {  
+            calc.input('sqrt(');  
+          } else if (b == 'x²') {  
+            calc.input('^2');  
+          } else if (b == 'x³') {  
+            calc.input('^3');  
+          } else if (b == 'xʸ') {  
+            calc.input('^');  
+          } else {  
+            calc.input(b);  
+          }  
+        },  
+        child: Text(b, style: const TextStyle(fontSize: 16)),  
+      );  
+    }).toList();  
+  }  
+}
+
+4.14 lib/screens/concrete_calculator_screen.dart
+
+import 'package:flutter/material.dart';  
+import 'package:provider/provider.dart';  
+import '../providers/concrete_provider.dart';  
+  
+class ConcreteCalculatorScreen extends StatefulWidget {  
+  const ConcreteCalculatorScreen({super.key});  
+  @override  
+  State<ConcreteCalculatorScreen> createState() => _ConcreteCalculatorScreenState();  
+}  
+  
+class _ConcreteCalculatorScreenState extends State<ConcreteCalculatorScreen> {  
+  String _selectedType = 'Slab';  
+  
+  @override  
+  Widget build(BuildContext context) {  
+    final prov = context.watch<ConcreteProvider>();  
+    return SingleChildScrollView(  
+      padding: const EdgeInsets.all(16),  
+      child: Column(  
+        children: [  
+          SegmentedButton<String>(  
+            segments: const [  
+              ButtonSegment(value: 'Slab', label: Text('Slab')),  
+              ButtonSegment(value: 'Beam', label: Text('Beam')),  
+              ButtonSegment(value: 'Column', label: Text('Column')),  
+              ButtonSegment(value: 'Footing', label: Text('Footing')),  
+            ],  
+            selected: {_selectedType},  
+            onSelectionChanged: (s) => setState(() => _selectedType = s.first),  
+          ),  
+          const SizedBox(height: 16),  
+          // Input fields based on type  
+          if (_selectedType == 'Slab') ...[  
+            _buildField('Length (m)', (v) => prov.slabLength = double.tryParse(v) ?? 0),  
+            _buildField('Width (m)', (v) => prov.slabWidth = double.tryParse(v) ?? 0),  
+            _buildField('Thickness (m)', (v) => prov.slabThickness = double.tryParse(v) ?? 0),  
+          ] else if (_selectedType == 'Beam') ...[  
+            _buildField('Length (m)', (v) => prov.beamLength = double.tryParse(v) ?? 0),  
+            _buildField('Width (m)', (v) => prov.beamWidth = double.tryParse(v) ?? 0),  
+            _buildField('Depth (m)', (v) => prov.beamDepth = double.tryParse(v) ?? 0),  
+          ] else if (_selectedType == 'Column') ...[  
+            _buildField('Side (m)', (v) => prov.columnSide = double.tryParse(v) ?? 0),  
+            _buildField('Height (m)', (v) => prov.columnHeight = double.tryParse(v) ?? 0),  
+          ] else if (_selectedType == 'Footing') ...[  
+            _buildField('Length (m)', (v) => prov.footingLength = double.tryParse(v) ?? 0),  
+            _buildField('Width (m)', (v) => prov.footingWidth = double.tryParse(v) ?? 0),  
+            _buildField('Depth (m)', (v) => prov.footingDepth = double.tryParse(v) ?? 0),  
+          ],  
+          const SizedBox(height: 16),  
+          Row(  
+            children: [  
+              const Text('Wastage % '),  
+              Expanded(  
+                child: Slider(  
+                  value: prov.wastagePercent,  
+                  min: 0,  
+                  max: 20,  
+                  divisions: 20,  
+                  label: '${prov.wastagePercent.round()}%',  
+                  onChanged: (v) => prov.setWastage(v),  
+                ),  
+              ),  
+              Text('${prov.wastagePercent.round()}%'),  
+            ],  
+          ),  
+          ElevatedButton(  
+            onPressed: () {  
+              if (_selectedType == 'Slab') prov.calculateSlab();  
+              if (_selectedType == 'Beam') prov.calculateBeam();  
+              if (_selectedType == 'Column') prov.calculateColumn();  
+              if (_selectedType == 'Footing') prov.calculateFooting();  
+            },  
+            child: const Text('Calculate Concrete'),  
+          ),  
+          if (prov.result.isNotEmpty) ...[  
+            const SizedBox(height: 16),  
+            Card(  
+              child: Padding(  
+                padding: const EdgeInsets.all(16),  
+                child: Column(  
+                  crossAxisAlignment: CrossAxisAlignment.start,  
+                  children: [  
+                    Text(prov.result, style: Theme.of(context).textTheme.titleMedium),  
+                    ...prov.steps.map((s) => Text('• $s')),  
+                  ],  
+                ),  
+              ),  
+            ),  
+          ],  
+        ],  
+      ),  
+    );  
+  }  
+  
+  Widget _buildField(String label, Function(String) onChanged) {  
+    return Padding(  
+      padding: const EdgeInsets.symmetric(vertical: 4),  
+      child: TextField(  
+        decoration: InputDecoration(labelText: label),  
+        keyboardType: TextInputType.number,  
+        onChanged: onChanged,  
+      ),  
+    );  
+  }  
+}
+
+4.15 lib/screens/steel_weight_screen.dart
+
+import 'package:flutter/material.dart';  
+import 'package:provider/provider.dart';  
+import '../providers/steel_provider.dart';  
+  
+class SteelWeightScreen extends StatelessWidget {  
+  const SteelWeightScreen({super.key});  
+  
+  @override  
+  Widget build(BuildContext context) {  
+    final steel = context.watch<SteelProvider>();  
+    return Padding(  
+      padding: const EdgeInsets.all(16),  
+      child: Column(  
+        crossAxisAlignment: CrossAxisAlignment.start,  
+        children: [  
+          DropdownButtonFormField<double>(  
+            value: steel.selectedDiameter,  
+            decoration: const InputDecoration(labelText: 'Rebar Diameter (mm)'),  
+            items: steel.availableDiameters  
+                .map((d) => DropdownMenuItem(value: d, child: Text('${d}mm')))  
+                .toList(),  
+            onChanged: (v) => steel.setDiameter(v!),  
+          ),  
+          TextField(  
+            decoration: const InputDecoration(labelText: 'Length (m)'),  
+            keyboardType: TextInputType.number,  
+            onChanged: (v) => steel.setLength(double.tryParse(v) ?? 0),  
+          ),  
+          TextField(  
+            decoration: const InputDecoration(labelText: 'Quantity'),  
+            keyboardType: TextInputType.number,  
+            onChanged: (v) => steel.setQuantity(int.tryParse(v) ?? 1),  
+          ),  
+          const SizedBox(height: 16),  
+          ElevatedButton(  
+            onPressed: steel.calculateWeight,  
+            child: const Text('Calculate Weight'),  
+          ),  
+          if (steel.result.isNotEmpty) ...[  
+            const SizedBox(height: 16),  
+            Card(  
+              child: Padding(  
+                padding: const EdgeInsets.all(16),  
+                child: Text(steel.result, style: Theme.of(context).textTheme.bodyLarge),  
+              ),  
+            ),  
+            const SizedBox(height: 8),  
+            Text('Formula: W = D² / 162 (kg/m)', style: Theme.of(context).textTheme.bodySmall),  
+          ],  
+        ],  
+      ),  
+    );  
+  }  
+}
+
+4.16 lib/screens/unit_converter_screen.dart
+
+import 'package:flutter/material.dart';  
+import 'package:provider/provider.dart';  
+import '../providers/unit_converter_provider.dart';  
+  
+class UnitConverterScreen extends StatelessWidget {  
+  const UnitConverterScreen({super.key});  
+  
+  @override  
+  Widget build(BuildContext context) {  
+    final conv = context.watch<UnitConverterProvider>();  
+    return Padding(  
+      padding: const EdgeInsets.all(16),  
+      child: Column(  
+        children: [  
+          DropdownButtonFormField<String>(  
+            value: conv.category,  
+            decoration: const InputDecoration(labelText: 'Category'),  
+            items: conv.categories  
+                .map((c) => DropdownMenuItem(value: c, child: Text(c)))  
+                .toList(),  
+            onChanged: (v) => conv.setCategory(v!),  
+          ),  
+          Row(  
+            children: [  
+              Expanded(  
+                child: DropdownButtonFormField<String>(  
+                  value: conv.fromUnit,  
+                  decoration: const InputDecoration(labelText: 'From'),  
+                  items: conv.unitsForCategory()  
+                      .map((u) => DropdownMenuItem(value: u, child: Text(u)))  
+                      .toList(),  
+                  onChanged: (v) => conv.setFromUnit(v!),  
+                ),  
+              ),  
+              const SizedBox(width: 16),  
+              Expanded(  
+                child: DropdownButtonFormField<String>(  
+                  value: conv.toUnit,  
+                  decoration: const InputDecoration(labelText: 'To'),  
+                  items: conv.unitsForCategory()  
+                      .map((u) => DropdownMenuItem(value: u, child: Text(u)))  
+                      .toList(),  
+                  onChanged: (v) => conv.setToUnit(v!),  
+                ),  
+              ),  
+            ],  
+          ),  
+          TextField(  
+            decoration: const InputDecoration(labelText: 'Value'),  
+            keyboardType: TextInputType.number,  
+            onChanged: (v) => conv.setInput(double.tryParse(v) ?? 0),  
+          ),  
+          const SizedBox(height: 16),  
+          Card(  
+            child: Padding(  
+              padding: const EdgeInsets.all(16),  
+              child: Row(  
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,  
+                children: [  
+                  Text('${conv.inputValue} ${conv.fromUnit}'),  
+                  const Icon(Icons.arrow_forward),  
+                  Text('${conv.outputValue.toStringAsFixed(4)} ${conv.toUnit}'),  
+                ],  
+              ),  
+            ),  
+          ),  
+        ],  
+      ),  
+    );  
+  }  
+}
+
+4.17 lib/screens/formula_library_screen.dart
+
+import 'package:flutter/material.dart';  
+import 'package:provider/provider.dart';  
+import '../providers/formula_provider.dart';  
+import '../models/formula.dart';  
+  
+class FormulaLibraryScreen extends StatefulWidget {  
+  const FormulaLibraryScreen({super.key});  
+  @override  
+  State<FormulaLibraryScreen> createState() => _FormulaLibraryScreenState();  
+}  
+  
+class _FormulaLibraryScreenState extends State<FormulaLibraryScreen> {  
+  final _searchController = TextEditingController();  
+  
+  @override  
+  Widget build(BuildContext context) {  
+    final formulas = context.watch<FormulaProvider>();  
+    return Column(  
+      children: [  
+        Padding(  
+          padding: const EdgeInsets.all(8.0),  
+          child: TextField(  
+            controller: _searchController,  
+            decoration: const InputDecoration(  
+              labelText: 'Search formulas',  
+              prefixIcon: Icon(Icons.search),  
+            ),  
+            onChanged: (v) => formulas.search(v),  
+          ),  
+        ),  
+        Expanded(  
+          child: ListView.builder(  
+            itemCount: formulas.filteredFormulas.length,  
+            itemBuilder: (ctx, i) {  
+              final f = formulas.filteredFormulas[i];  
+              return ListTile(  
+                title: Text(f.title),  
+                subtitle: Text(f.formula),  
+                trailing: IconButton(  
+                  icon: Icon(  
+                    formulas.isFavorite(f.id) ? Icons.star : Icons.star_border,  
+                    color: formulas.isFavorite(f.id) ? Colors.amber : null,  
+                  ),  
+                  onPressed: () => formulas.toggleFavorite(f.id),  
+                ),  
+                onTap: () => _showDetail(f),  
+              );  
+            },  
+          ),  
+        ),  
+      ],  
+    );  
+  }  
+  
+  void _showDetail(Formula f) {  
+    showDialog(  
+      context: context,  
+      builder: (_) => AlertDialog(  
+        title: Text(f.title),  
+        content: Column(  
+          mainAxisSize: MainAxisSize.min,  
+          crossAxisAlignment: CrossAxisAlignment.start,  
+          children: [  
+            Text('Category: ${f.category}'),  
+            const SizedBox(height: 8),  
+            Text('Formula: ${f.formula}', style: const TextStyle(fontWeight: FontWeight.bold)),  
+            const SizedBox(height: 8),  
+            Text(f.description),  
+          ],  
+        ),  
+        actions: [TextButton(onPressed: () => Navigator.pop(context), child: const Text('Close'))],  
+      ),  
+    );  
+  }  
+}
+
+4.18 lib/screens/history_screen.dart
+
+import 'package:flutter/material.dart';  
+import 'package:provider/provider.dart';  
+import 'package:intl/intl.dart';  
+import '../providers/history_provider.dart';  
+import '../models/calculation.dart';  
+  
+class HistoryScreen extends StatefulWidget {  
+  const HistoryScreen({super.key});  
+  @override  
+  State<HistoryScreen> createState() => _HistoryScreenState();  
+}  
+  
+class _HistoryScreenState extends State<HistoryScreen> {  
+  final _searchController = TextEditingController();  
+  
+  @override  
+  Widget build(BuildContext context) {  
+    final hist = context.watch<HistoryProvider>();  
+    return Column(  
+      children: [  
+        Padding(  
+          padding: const EdgeInsets.all(8.0),  
+          child: Row(  
+            children: [  
+              Expanded(  
+                child: TextField(  
+                  controller: _searchController,  
+                  decoration: const InputDecoration(  
+                    labelText: 'Search history',  
+                    prefixIcon: Icon(Icons.search),  
+                  ),  
+                  onChanged: (v) => hist.search(v),  
+                ),  
+              ),  
+              IconButton(  
+                icon: const Icon(Icons.picture_as_pdf),  
+                tooltip: 'Export to PDF',  
+                onPressed: hist.exportToPDF,  
+              ),  
+              IconButton(  
+                icon: const Icon(Icons.delete_sweep),  
+                tooltip: 'Clear all',  
+                onPressed: () async {  
+                  final ok = await showDialog<bool>(  
+                    context: context,  
+                    builder: (_) => AlertDialog(  
+                      title: const Text('Clear all history?'),  
+                      actions: [  
+                        TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),  
+                        TextButton(onPressed: () => Navigator.pop(context, true), child: const Text('Clear')),  
+                      ],  
+                    ),  
+                  );  
+                  if (ok == true) hist.clearAll();  
+                },  
+              ),  
+            ],  
+          ),  
+        ),  
+        Expanded(  
+          child: hist.filteredCalculations.isEmpty  
+              ? const Center(child: Text('No history found.'))  
+              : ListView.builder(  
+                  itemCount: hist.filteredCalculations.length,  
+                  itemBuilder: (ctx, i) {  
+                    final calc = hist.filteredCalculations[i];  
+                    return Dismissible(  
+                      key: Key(calc.id.toString()),  
+                      onDismissed: (_) => hist.deleteCalculation(calc.id!),  
+                      background: Container(color: Colors.red),  
+                      child: ListTile(  
+                        leading: Icon(_iconForType(calc.type)),  
+                        title: Text(calc.input),  
+                        subtitle: Text(calc.result),  
+                        trailing: Text(  
+                          DateFormat('dd/MM HH:mm').format(calc.timestamp),  
+                          style: Theme.of(context).textTheme.bodySmall,  
+                        ),  
+                      ),  
+                    );  
+                  },  
+                ),  
+        ),  
+      ],  
+    );  
+  }  
+  
+  IconData _iconForType(String type) {  
+    switch (type) {  
+      case 'scientific': return Icons.calculate;  
+      case 'concrete': return Icons.build;  
+      case 'steel': return Icons.iron;  
+      case 'unit': return Icons.swap_horiz;  
+      default: return Icons.history;  
+    }  
+  }  
+}
+
+4.19 lib/services/database_service.dart
+
+import 'package:sqflite/sqflite.dart';  
+import 'package:path/path.dart';  
+import '../models/calculation.dart';  
+  
+class DatabaseService {  
+  static final DatabaseService instance = DatabaseService._internal();  
+  factory DatabaseService() => instance;  
+  DatabaseService._internal();  
+  
+  static Database? _db;  
+  
+  Future<Database> get database async {  
+    if (_db != null) return _db!;  
+    _db = await _initDB();  
+    return _db!;  
+  }  
+  
+  Future<Database> _initDB() async {  
+    final dbPath = await getDatabasesPath();  
+    final path = join(dbPath, 'ce_calculator.db');  
+    return openDatabase(path, version: 1, onCreate: _onCreate);  
+  }  
+  
+  Future _onCreate(Database db, int version) async {  
+    await db.execute('''  
+      CREATE TABLE calculations(  
+        id INTEGER PRIMARY KEY AUTOINCREMENT,  
+        type TEXT NOT NULL,  
+        input TEXT,  
+        result TEXT,  
+        timestamp TEXT NOT NULL  
+      )  
+    ''');  
+    await db.execute('''  
+      CREATE TABLE favorite_formulas(  
+        id INTEGER PRIMARY KEY AUTOINCREMENT,  
+        formula_id INTEGER UNIQUE NOT NULL  
+      )  
+    ''');  
+  }  
+  
+  // Calculations CRUD  
+  Future<int> saveCalculation(Calculation calc) async {  
+    final db = await database;  
+    return db.insert('calculations', calc.toMap());  
+  }  
+  
+  Future<List<Calculation>> getAllCalculations() async {  
+    final db = await database;  
+    final maps = await db.query('calculations', orderBy: 'timestamp DESC');  
+    return maps.map((m) => Calculation.fromMap(m)).toList();  
+  }  
+  
+  Future<int> deleteCalculation(int id) async {  
+    final db = await database;  
+    return db.delete('calculations', where: 'id = ?', whereArgs: [id]);  
+  }  
+  
+  Future<void> clearAllCalculations() async {  
+    final db = await database;  
+    await db.delete('calculations');  
+  }  
+  
+  // Favorites  
+  Future<List<int>> getFavoriteIds() async {  
+    final db = await database;  
+    final result = await db.query('favorite_formulas');  
+    return result.map((r) => r['formula_id'] as int).toList();  
+  }  
+  
+  Future<void> addFavorite(int formulaId) async {  
+    final db = await database;  
+    await db.insert('favorite_formulas', {'formula_id': formulaId},  
+        conflictAlgorithm: ConflictAlgorithm.ignore);  
+  }  
+  
+  Future<void> removeFavorite(int formulaId) async {  
+    final db = await database;  
+    await db.delete('favorite_formulas', where: 'formula_id = ?', whereArgs: [formulaId]);  
+  }  
+}
+
+4.20 lib/services/pdf_export_service.dart
+
+import 'dart:io';  
+import 'package:flutter/material.dart';  
+import 'package:pdf/pdf.dart';  
+import 'package:pdf/widgets.dart' as pw;  
+import 'package:path_provider/path_provider.dart';  
+import 'package:share_plus/share_plus.dart';  
+import '../models/calculation.dart';  
+  
+class PDFExportService {  
+  static Future<void> exportCalculations(List<Calculation> calcs) async {  
+    final pdf = pw.Document();  
+    pdf.addPage(  
+      pw.MultiPage(  
+        build: (ctx) => [  
+          pw.Header(text: 'Calculation History', level: 0),  
+          pw.Table.fromTextArray(  
+            headers: ['Type', 'Input', 'Result', 'Timestamp'],  
+            data: calcs.map((c) => [  
+              c.type,  
+              c.input,  
+              c.result,  
+              c.timestamp.toIso8601String().substring(0, 16),  
+            ]).toList(),  
+          ),  
+        ],  
+      ),  
+    );  
+  
+    final directory = await getTemporaryDirectory();  
+    final file = File('${directory.path}/history.pdf');  
+    await file.writeAsBytes(await pdf.save());  
+    await Share.shareXFiles([XFile(file.path)], text: 'CE Calculator History');  
+  }  
+}
+
+4.21 lib/utils/constants.dart
+
+class AppConstants {  
+  static const double pi = 3.141592653589793;  
+  static const double e = 2.718281828459045;  
+}
+
+4.22 lib/utils/converters.dart
+
+class Converters {  
+  static const Map<String, Map<String, double>> _factors = {  
+    'Length': {  
+      'Meter': 1,  
+      'Kilometer': 0.001,  
+      'Centimeter': 100,  
+      'Millimeter': 1000,  
+      'Mile': 0.000621371,  
+      'Yard': 1.09361,  
+      'Foot': 3.28084,  
+      'Inch': 39.3701,  
+    },  
+    'Area': {  
+      'Square Meter': 1,  
+      'Square Kilometer': 1e-6,  
+      'Square Mile': 3.861e-7,  
+      'Square Yard': 1.19599,  
+      'Square Foot': 10.7639,  
+      'Square Inch': 1550,  
+      'Hectare': 0.0001,  
+      'Acre': 0.000247105,  
+    },  
+    'Volume': {  
+      'Cubic Meter': 1,  
+      'Liter': 1000,  
+      'Milliliter': 1e6,  
+      'Gallon (US)': 264.172,  
+      'Cubic Foot': 35.3147,  
+      'Cubic Inch': 61023.7,  
+    },  
+    'Weight': {  
+      'Kilogram': 1,  
+      'Gram': 1000,  
+      'Milligram': 1e6,  
+      'Metric Ton': 0.001,  
+      'Pound': 2.20462,  
+      'Ounce': 35.274,  
+    },  
+    'Pressure': {  
+      'Pascal': 1,  
+      'Kilopascal': 0.001,  
+      'Bar': 1e-5,  
+      'PSI': 0.000145038,  
+      'Atmosphere': 9.86923e-6,  
+    },  
+  };  
+  
+  static List<String> get categories => _factors.keys.toList();  
+  
+  static List<String> units(String category) {  
+    return _factors[category]?.keys.toList() ?? [];  
+  }  
+  
+  static double? convert(String category, String from, String to, double value) {  
+    final factors = _factors[category];  
+    if (factors == null) return null;  
+    if (category == 'Temperature') return _convertTemperature(from, to, value);  
+    final fromFactor = factors[from];  
+    final toFactor = factors[to];  
+    if (fromFactor == null || toFactor == null) return null;  
+    final base = value / fromFactor;  
+    return base * toFactor;  
+  }  
+  
+  static double? _convertTemperature(String from, String to, double value) {  
+    double celsius;  
+    switch (from) {  
+      case 'Celsius': celsius = value; break;  
+      case 'Fahrenheit': celsius = (value - 32) * 5 / 9; break;  
+      case 'Kelvin': celsius = value - 273.15; break;  
+      default: return null;  
+    }  
+    switch (to) {  
+      case 'Celsius': return celsius;  
+      case 'Fahrenheit': return celsius * 9 / 5 + 32;  
+      case 'Kelvin': return celsius + 273.15;  
+      default: return null;  
+    }  
+  }  
+}
+
+4.23 lib/widgets/custom_drawer.dart
+
+import 'package:flutter/material.dart';  
+import 'package:provider/provider.dart';  
+import '../providers/theme_provider.dart';  
+  
+class CustomDrawer extends StatelessWidget {  
+  const CustomDrawer({super.key});  
+  
+  @override  
+  Widget build(BuildContext context) {  
+    final theme = context.watch<ThemeProvider>();  
+    return Drawer(  
+      child: ListView(  
+        children: [  
+          DrawerHeader(  
+            decoration: BoxDecoration(color: Theme.of(context).colorScheme.primaryContainer),  
+            child: const Text('CE Engineering\nCalculator Pro',  
+                style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),  
+          ),  
+          SwitchListTile(  
+            title: const Text('Dark Mode'),  
+            value: theme.themeMode == ThemeMode.dark,  
+            onChanged: (v) => theme.toggleTheme(v),  
+            secondary: const Icon(Icons.dark_mode),  
+          ),  
+          const ListTile(  
+            leading: Icon(Icons.info),  
+            title: Text('Version 1.0.0'),  
+          ),  
+        ],  
+      ),  
+    );  
+  }  
+}
+
+4.24 lib/widgets/result_card.dart
+
+(Optional reusable card – can be used, but we inline Cards above. Provided here for completeness.)
+
+import 'package:flutter/material.dart';  
+  
+class ResultCard extends StatelessWidget {  
+  final String title;  
+  final String result;  
+  const ResultCard({super.key, required this.title, required this.result});  
+  
+  @override  
+  Widget build(BuildContext context) {  
+    return Card(  
+      child: Padding(  
+        padding: const EdgeInsets.all(16),  
+        child: Column(  
+          children: [  
+            Text(title, style: Theme.of(context).textTheme.titleMedium),  
+            const SizedBox(height: 8),  
+            Text(result, style: Theme.of(context).textTheme.headlineSmall),  
+          ],  
+        ),  
+      ),  
+    );  
+  }  
+}
+
+
+---
